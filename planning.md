@@ -52,7 +52,7 @@ Non-empty `str` with outfit suggestions.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
-If the `wardrobe` is None, offer general styling advice for `new_item`. If no outfit can be suggested, fail gracefully with an error message.
+If the wardrobe is empty, offer general styling advice for `new_item`. If no outfit can be suggested, fail gracefully with an error message.
 
 ---
 
