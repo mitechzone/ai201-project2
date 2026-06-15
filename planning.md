@@ -132,6 +132,8 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 ## A Complete Interaction (Step by Step)
 
+FitFindr takes a natural-language request from user and calls three tools in order. A user query triggers `search_listings`, which filters the listings by description, size, and price. The top match flows into `suggest_outfit`, which pairs it against the user's wardrobe. The suggestion flows into `create_fit_card`, which writes a shareable caption. If `search_listings` returns nothing, the agent stops and tells the user instead of calling the later tools with empty input.
+
 Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
