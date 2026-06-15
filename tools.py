@@ -21,7 +21,7 @@ from utils.data_loader import load_listings
 
 load_dotenv()
 
-MODEL = "openai/gpt-oss-120b" # "llama-3.3-70b-versatile"
+MODEL = "llama-3.3-70b-versatile"
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────

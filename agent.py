@@ -18,7 +18,63 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+
+from tools import search_listings, suggest_outfit, create_fit_card, _chat
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+def parse_query(query: str) -> dict | None:
+    """
+    Use the LLM to extract search parameters from a natural-language query.
+
+    Returns a dict with keys:
+        description (str): item keywords to search for
+        size (str | None): requested size, or None if not specified
+        max_price (float | None): price ceiling, or None if not specified
+
+    Returns None if the query can't be parsed (bad JSON, no description, or an
+    API error) so the planning loop can report the failure to the user.
+    """
+    prompt = (
+        "Extract thrift-search parameters from the user's request. "
+        "Return ONLY a JSON object with exactly these keys:\n"
+        '  "description": a string of item keywords (e.g. "vintage graphic tee"),\n'
+        '  "size": the requested size as a string, or null if none is mentioned,\n'
+        '  "max_price": the price ceiling as a number, or null if none is mentioned.\n\n'
+        f"User request: {query}"
+    )
+
+    try:
+        raw = _chat(
+            [
+                {"role": "system", "content": "You extract structured search filters from text."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
+        # Tolerate ```json ... ``` fences around the JSON.
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[len("json"):]
+        parsed = json.loads(text.strip())
+
+        description = (parsed.get("description") or "").strip()
+        if not description:
+            return None
+
+        size = parsed.get("size")
+        size = size.strip() if isinstance(size, str) and size.strip() else None
+
+        max_price = parsed.get("max_price")
+        max_price = float(max_price) if max_price is not None else None
+
+        return {"description": description, "size": size, "max_price": max_price}
+    except Exception:
+        return None
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +148,46 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into search parameters.
+    parsed = parse_query(query) if query and query.strip() else None
+    if not parsed:
+        session["error"] = (
+            "Sorry, I didn't quite catch what you're looking for — try describing "
+            "the item, and add a size or budget if you have one."
+        )
+        return session
+    session["parsed"] = parsed
+
+    # Step 3: search listings. No matches → stop here, don't call the later tools.
+    results = search_listings(parsed["description"], parsed["size"], parsed["max_price"])
+    session["search_results"] = results
+    if not results:
+        session["error"] = (
+            "I couldn't find any listings matching that. Try a higher budget, a "
+            "different size, or simpler keywords."
+        )
+        return session
+
+    # Step 4: select the top result.
+    session["selected_item"] = results[0]
+
+    # Step 5: suggest an outfit using the selected item + wardrobe.
+    outfit = suggest_outfit(session["selected_item"], wardrobe)
+    if not outfit or not outfit.strip():
+        session["error"] = (
+            "I found the item but couldn't put an outfit together just now — "
+            "please try again in a moment."
+        )
+        return session
+    session["outfit_suggestion"] = outfit
+
+    # Step 6: turn the outfit into a shareable fit card.
+    session["fit_card"] = create_fit_card(outfit, session["selected_item"])
+
+    # Step 7: done.
     return session
 
 
