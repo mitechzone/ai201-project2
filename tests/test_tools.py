@@ -8,8 +8,9 @@ GROQ_API_KEY in .env and network access. The search tests and the empty-outfit
 guard test are deterministic and run offline.
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 from utils.data_loader import load_listings, get_empty_wardrobe
+from agent import _update_style_profile, reset_style_profile
 
 
 # ── search_listings ────────────────────────────────────────────────────────────
@@ -49,3 +50,35 @@ def test_create_fit_card_empty_outfit():
     result = create_fit_card("", item)
     assert isinstance(result, str)
     assert result.strip() != ""
+
+
+# ── compare_price (stretch) ─────────────────────────────────────────────────────
+
+def test_compare_price_returns_reasoning():
+    item = load_listings()[0]
+    result = compare_price(item)
+    assert isinstance(result, str)
+    # The reasoning string names a verdict and cites the comparison.
+    assert any(v in result for v in ("Great deal", "Fair", "Pricey"))
+    assert "median" in result
+
+
+def test_compare_price_low_price_is_great_deal():
+    item = dict(load_listings()[0], id="fake", category="tops", price=1.0)
+    assert compare_price(item).startswith("Great deal")
+
+
+def test_compare_price_high_price_is_pricey():
+    item = dict(load_listings()[0], id="fake", category="tops", price=999.0)
+    assert compare_price(item).startswith("Pricey")
+
+
+# ── style profile memory (stretch) ──────────────────────────────────────────────
+
+def test_update_style_profile_accumulates():
+    # Merges across calls, dedups case-insensitively, lowercases.
+    reset_style_profile()
+    _update_style_profile(["Grunge", "baggy"])
+    result = _update_style_profile(["grunge", "y2k"])
+    assert result == ["grunge", "baggy", "y2k"]
+    reset_style_profile()

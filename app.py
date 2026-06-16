@@ -29,23 +29,22 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
 
     Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+        A tuple of four strings:
+            (listing_text, outfit_suggestion, fit_card, price_text)
+        Each string maps to one of the four output panels in the UI.
 
     TODO:
         1. Guard against an empty query (return early with an error message).
         2. Select the wardrobe based on wardrobe_choice.
         3. Call run_agent() with the query and selected wardrobe.
         4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
+           and empty strings for the others.
         5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
+           string and return it along with the outfit, fit card, and price check.
     """
     # 1. Guard against an empty query.
     if not user_query or not user_query.strip():
-        return "Please enter what you're looking for.", "", ""
+        return "Please enter what you're looking for.", "", "", ""
 
     # 2. Select the wardrobe based on the radio choice.
     wardrobe = (
@@ -59,18 +58,34 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     # 4. Error path → message in the first panel, others blank.
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", ""
 
-    # 5. Happy path → format the listing and return all three panels.
+    # 5. Happy path → format the listing (with any retry notice + style memory)
+    #    and return all four panels.
     item = session["selected_item"]
     brand = item["brand"] or "Unbranded"
-    listing_text = (
+
+    listing_lines = []
+    if session["notice"]:
+        listing_lines.append(f"ℹ️ {session['notice']}\n")
+    listing_lines.append(
         f"{item['title']}\n"
         f"${item['price']:.2f} — {item['platform']}\n"
         f"Size: {item['size']} | Condition: {item['condition']} | Brand: {brand}\n\n"
         f"{item['description']}"
     )
-    return listing_text, session["outfit_suggestion"], session["fit_card"]
+    if session["style_profile"]:
+        listing_lines.append(
+            f"\n🧠 Style memory: {', '.join(session['style_profile'])}"
+        )
+    listing_text = "\n".join(listing_lines)
+
+    return (
+        listing_text,
+        session["outfit_suggestion"],
+        session["fit_card"],
+        session["price_assessment"],
+    )
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -123,6 +138,11 @@ Describe what you're looking for — include size and price if you want to filte
                 lines=8,
                 interactive=False,
             )
+            price_output = gr.Textbox(
+                label="💰 Price check",
+                lines=8,
+                interactive=False,
+            )
 
         gr.Examples(
             examples=[[q, "Example wardrobe"] for q in EXAMPLE_QUERIES],
@@ -133,12 +153,12 @@ Describe what you're looking for — include size and price if you want to filte
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, price_output],
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output, price_output],
         )
 
     return demo

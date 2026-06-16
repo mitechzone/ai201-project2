@@ -20,7 +20,37 @@ Usage (once implemented):
 
 import json
 
-from tools import search_listings, suggest_outfit, create_fit_card, _chat
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price, _chat
+
+
+# ── style profile memory (stretch) ──────────────────────────────────────────────
+# In-memory store that outlives a single run_agent() call, so style preferences
+# stated in one query carry into later queries within the same app run.
+# Intentionally not persisted to disk — it resets when the app restarts.
+
+_STYLE_PROFILE = {"styles": []}
+
+
+def get_style_profile() -> dict:
+    """Return the current in-memory style profile."""
+    return _STYLE_PROFILE
+
+
+def reset_style_profile() -> None:
+    """Clear the style profile (used by tests and to start a new user session)."""
+    _STYLE_PROFILE["styles"] = []
+
+
+def _update_style_profile(new_prefs: list) -> list:
+    """Merge new style keywords into the profile (case-insensitive dedup).
+
+    Returns the updated list of remembered styles.
+    """
+    for pref in new_prefs or []:
+        cleaned = pref.strip().lower()
+        if cleaned and cleaned not in _STYLE_PROFILE["styles"]:
+            _STYLE_PROFILE["styles"].append(cleaned)
+    return _STYLE_PROFILE["styles"]
 
 
 # ── query parsing ─────────────────────────────────────────────────────────────
@@ -33,6 +63,8 @@ def parse_query(query: str) -> dict | None:
         description (str): item keywords to search for
         size (str | None): requested size, or None if not specified
         max_price (float | None): price ceiling, or None if not specified
+        style_prefs (list[str]): style keywords the user mentions (e.g. grunge,
+            baggy, y2k), or an empty list if none — used by style memory.
 
     Returns None if the query can't be parsed (bad JSON, no description, or an
     API error) so the planning loop can report the failure to the user.
@@ -42,7 +74,9 @@ def parse_query(query: str) -> dict | None:
         "Return ONLY a JSON object with exactly these keys:\n"
         '  "description": a string of item keywords (e.g. "vintage graphic tee"),\n'
         '  "size": the requested size as a string, or null if none is mentioned,\n'
-        '  "max_price": the price ceiling as a number, or null if none is mentioned.\n\n'
+        '  "max_price": the price ceiling as a number, or null if none is mentioned,\n'
+        '  "style_prefs": a list of style descriptors the user mentions '
+        '(e.g. ["grunge", "baggy"]), or [] if none.\n\n'
         f"User request: {query}"
     )
 
@@ -72,7 +106,17 @@ def parse_query(query: str) -> dict | None:
         max_price = parsed.get("max_price")
         max_price = float(max_price) if max_price is not None else None
 
-        return {"description": description, "size": size, "max_price": max_price}
+        style_prefs = parsed.get("style_prefs") or []
+        if not isinstance(style_prefs, list):
+            style_prefs = []
+        style_prefs = [str(p).strip() for p in style_prefs if str(p).strip()]
+
+        return {
+            "description": description,
+            "size": size,
+            "max_price": max_price,
+            "style_prefs": style_prefs,
+        }
     except Exception:
         return None
 
@@ -98,6 +142,9 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        "notice": None,              # stretch: retry-fallback explanation
+        "price_assessment": None,    # stretch: compare_price result string
+        "style_profile": [],         # stretch: remembered style prefs snapshot
     }
 
 
@@ -161,21 +208,35 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         return session
     session["parsed"] = parsed
 
-    # Step 3: search listings. No matches → stop here, don't call the later tools.
+    # Stretch (style memory): remember style prefs from this query and carry
+    # forward anything remembered from earlier queries this app run.
+    _update_style_profile(parsed["style_prefs"])
+    session["style_profile"] = list(get_style_profile()["styles"])
+
+    # Step 3: search listings. No matches → retry with loosened filters before
+    # giving up, and don't call the later tools if nothing turns up at all.
     results = search_listings(parsed["description"], parsed["size"], parsed["max_price"])
     session["search_results"] = results
     if not results:
-        session["error"] = (
-            "I couldn't find any listings matching that. Try a higher budget, a "
-            "different size, or simpler keywords."
-        )
-        return session
+        results = _search_with_fallback(session, parsed)
+        if not results:
+            session["error"] = (
+                "I couldn't find any listings matching that. Try a higher budget, a "
+                "different size, or simpler keywords."
+            )
+            return session
+        session["search_results"] = results
 
     # Step 4: select the top result.
     session["selected_item"] = results[0]
 
-    # Step 5: suggest an outfit using the selected item + wardrobe.
-    outfit = suggest_outfit(session["selected_item"], wardrobe)
+    # Stretch (price comparison): assess whether the price is fair.
+    session["price_assessment"] = compare_price(session["selected_item"])
+
+    # Step 5: suggest an outfit using the selected item, wardrobe, and remembered style.
+    outfit = suggest_outfit(
+        session["selected_item"], wardrobe, style_profile=session["style_profile"]
+    )
     if not outfit or not outfit.strip():
         session["error"] = (
             "I found the item but couldn't put an outfit together just now — "
@@ -191,6 +252,35 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     return session
 
 
+def _search_with_fallback(session: dict, parsed: dict) -> list:
+    """Retry search with loosened constraints when the exact query found nothing.
+
+    First drops the size filter, then drops the price cap. On success, records a
+    user-facing explanation in session["notice"]. Returns the matches (or []).
+    """
+    # Retry 1: drop the size filter (if one was applied).
+    if parsed["size"] is not None:
+        results = search_listings(parsed["description"], None, parsed["max_price"])
+        if results:
+            session["notice"] = (
+                f"No exact matches in size {parsed['size']}, so I dropped the size "
+                "filter to show you these."
+            )
+            return results
+
+    # Retry 2: drop the price cap (if one was applied).
+    if parsed["max_price"] is not None:
+        results = search_listings(parsed["description"], None, None)
+        if results:
+            session["notice"] = (
+                f"No matches under ${parsed['max_price']:.2f}, so I relaxed the "
+                "budget (and size) to show you these."
+            )
+            return results
+
+    return []
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -204,9 +294,22 @@ if __name__ == "__main__":
     if session["error"]:
         print(f"Error: {session['error']}")
     else:
+        if session["notice"]:
+            print(f"Notice: {session['notice']}\n")
         print(f"Found: {session['selected_item']['title']}")
+        print(f"Price check: {session['price_assessment']}")
         print(f"\nOutfit: {session['outfit_suggestion']}")
         print(f"\nFit card: {session['fit_card']}")
+        print(f"\nStyle memory: {session['style_profile']}")
+
+    print("\n\n=== Retry-fallback path: impossible size ===\n")
+    reset_style_profile()
+    session_r = run_agent(
+        query="vintage graphic tee size XXS under $50",
+        wardrobe=get_example_wardrobe(),
+    )
+    print(f"Notice: {session_r['notice']}")
+    print(f"Found: {session_r['selected_item'] and session_r['selected_item']['title']}")
 
     print("\n\n=== No-results path ===\n")
     session2 = run_agent(

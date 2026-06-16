@@ -114,7 +114,7 @@ def search_listings(
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def suggest_outfit(new_item: dict, wardrobe: dict, style_profile: list | None = None) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
@@ -122,6 +122,8 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         new_item: A listing dict (the item the user is considering buying).
         wardrobe: A wardrobe dict with an 'items' key containing a list of
                   wardrobe item dicts. May be empty — handle this gracefully.
+        style_profile: Optional list of remembered style keywords (stretch:
+                  style memory). When provided, the suggestion leans into them.
 
     Returns:
         A non-empty string with outfit suggestions.
@@ -168,6 +170,12 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
             "Suggest 1-2 complete outfit combinations that pair the new item with "
             "specific named pieces from their wardrobe. Mention the wardrobe pieces "
             "by name. Keep it to 2-4 sentences, friendly and concrete."
+        )
+
+    if style_profile:
+        prompt += (
+            "\n\nThe shopper's remembered style preferences are: "
+            f"{', '.join(style_profile)}. Lean into these where it makes sense."
         )
 
     try:
@@ -265,4 +273,54 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     return caption.strip() if caption and caption.strip() else (
         f"thrifted this {new_item['title'].lower()} off {new_item['platform']} "
         f"for ${new_item['price']} 🖤"
+    )
+
+
+# ── Tool 4: compare_price (stretch) ─────────────────────────────────────────────
+
+def compare_price(new_item: dict) -> str:
+    """
+    Estimate whether a listing's price is fair by comparing it against other
+    listings in the same category in the dataset.
+
+    Args:
+        new_item: The selected listing dict to assess.
+
+    Returns:
+        A short assessment string that states the verdict AND the reasoning: the
+        item's price versus the median price of comparable same-category listings,
+        and how many were compared. The verdict is "great deal" (>=15% below the
+        median), "pricey" (>=15% above), or "fair" (within that band).
+
+    Failure mode:
+        If fewer than 2 comparable listings exist, returns the exact message
+        "Unknown — there aren't enough comparable listings to judge whether this
+        price is fair." rather than a misleading verdict — never raises.
+    """
+    category = new_item.get("category")
+    price = new_item["price"]
+
+    comps = [
+        l["price"]
+        for l in load_listings()
+        if l["category"] == category and l["id"] != new_item["id"]
+    ]
+
+    if len(comps) < 2:
+        return "Unknown — there aren't enough comparable listings to judge whether this price is fair."
+
+    comps.sort()
+    n = len(comps)
+    median = comps[n // 2] if n % 2 else (comps[n // 2 - 1] + comps[n // 2]) / 2
+
+    if price <= 0.85 * median:
+        verdict, relation = "Great deal", "well below"
+    elif price >= 1.15 * median:
+        verdict, relation = "Pricey", "above"
+    else:
+        verdict, relation = "Fair", "in line with"
+
+    return (
+        f"{verdict} — at ${price:.2f} it's {relation} the ${median:.2f} median "
+        f"for {category} across {n} comparable listings."
     )

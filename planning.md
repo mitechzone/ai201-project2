@@ -79,7 +79,19 @@ If the outfit data is incomplete, fail gracefully with an error message.
 
 ### Additional Tools (if any)
 
-<!-- Copy the block above for any tools beyond the required three -->
+### Tool 4: compare_price (stretch goal)
+
+**What it does:**
+Estimates whether a listing's price is fair by comparing it against other listings in the same category in the dataset.
+
+**Input parameters:**
+- `new_item` (dict): the selected listing dict to assess.
+
+**What it returns:**
+An `str` that states the verdict **and the reasoning**: the verdict ("great deal", "fair", or "pricey") plus the item's price compared to the median price of same-category listings and how many comparables were used. The verdict is "great deal" when the price is 15%+ below the median, "pricey" when 15%+ above, and "fair" within that band.
+
+**What happens if it fails or returns nothing:**
+If there are fewer than 2 comparable listings, returns the exact message "Unknown — there aren't enough comparable listings to judge whether this price is fair." instead of a misleading verdict.
 
 ---
 
@@ -108,6 +120,12 @@ If the outfit data is incomplete, fail gracefully with an error message.
 
 6. Return the session.
 
+### Stretch additions to the loop
+
+- **Style memory (Step 2):** the LLM parse also extracts `style_prefs` from the query. These are merged into a module-level style profile and snapshotted into `session["style_profile"]`, then passed to `suggest_outfit` so later queries reflect earlier-stated preferences without re-entry.
+- **Retry with fallback (Step 3):** if `search_listings` returns `[]`, retry with loosened constraints before erroring — first drop the size filter, then drop the price cap. On success, set `session["notice"]` explaining what was loosened and continue. Only if every retry is still empty does the no-results error fire.
+- **Price comparison (after Step 4):** once an item is selected, call `compare_price(selected_item)` and store the result in `session["price_assessment"]`.
+
 ---
 
 ## State Management
@@ -130,6 +148,8 @@ The `session` dict tracks the following data:
 
 Each tool's output is written to session before the next reads it.
 
+**Stretch additions:** the session also tracks `notice` (retry explanation), `price_assessment` (the `compare_price` result dict), and `style_profile` (a snapshot of the remembered preferences). Style memory is held in a **module-level dict in `agent.py`** that outlives any single `run_agent()` call, so preferences persist across queries within one app run.
+
 ---
 
 ## Error Handling
@@ -141,6 +161,7 @@ For each tool, describe the specific failure mode you're handling and what the a
 | search_listings | No results match the query | Returns early with a graceful error message "Sorry, no listings matched your description, size, and budget." |
 | suggest_outfit | Wardrobe is empty | Provides generic advice based on the selected item only. |
 | create_fit_card | Outfit input is missing or incomplete | Returns with a graceful error message, e.g., "Sorry, an error has occurred." |
+| compare_price (stretch) | Fewer than 2 comparable listings to compare against | Returns "Unknown — there aren't enough comparable listings to judge whether this price is fair." |
 
 ---
 
@@ -159,14 +180,19 @@ For each tool, describe the specific failure mode you're handling and what the a
 flowchart TD
     U([User query]) --> RA["run_agent(query, wardrobe)<br/>init session via _new_session()"]
 
-    RA --> P{"LLM parse query<br/>→ description, size, max_price"}
+    RA --> P{"LLM parse query<br/>→ description, size, max_price, style_prefs"}
     P -- "parse fails" --> ERR["set session['error']<br/>return early"]
-    P -- "ok" --> SL["search_listings(description, size, max_price)"]
+    P -- "ok" --> UP["update style profile<br/>(merge style_prefs)"]
+    UP --> SL["search_listings(description, size, max_price)"]
 
-    SL -- "results == []" --> ERR
     SL -- "results = [item, ...]" --> SEL["session['selected_item'] = results[0]"]
+    SL -- "results == []" --> RT{"retry: drop size,<br/>then drop price cap"}
+    RT -- "found" --> NOTE["set session['notice']<br/>(what was loosened)"]
+    RT -- "still empty" --> ERR
+    NOTE --> SEL
 
-    SEL --> SO["suggest_outfit(selected_item, wardrobe)"]
+    SEL --> CP["compare_price(selected_item)"]
+    CP --> SO["suggest_outfit(selected_item, wardrobe, style_profile)"]
     SO -- "error / empty string" --> ERR
     SO -- "outfit string" --> FC["create_fit_card(outfit_suggestion, selected_item)"]
 
@@ -177,10 +203,13 @@ flowchart TD
     ERR --> RET
 
     %% shared state — each tool writes its result before the next reads it
-    SESS[("session dict<br/>query · parsed · search_results · selected_item<br/>wardrobe · outfit_suggestion · fit_card · error")]
+    SESS[("session dict<br/>query · parsed · search_results · selected_item · wardrobe<br/>outfit_suggestion · fit_card · error<br/>notice · price_assessment · style_profile")]
     P -. "parsed" .-> SESS
+    UP -. "style_profile" .-> SESS
     SL -. "search_results" .-> SESS
+    RT -. "notice" .-> SESS
     SEL -. "selected_item" .-> SESS
+    CP -. "price_assessment" .-> SESS
     SO -. "outfit_suggestion" .-> SESS
     FC -. "fit_card" .-> SESS
 ```
